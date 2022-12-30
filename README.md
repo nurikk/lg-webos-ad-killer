@@ -21,3 +21,11 @@ After reboot your tv OR run command
 ```
 /var/lib/webosbrew/init.d/ad_killer
 ```
+
+
+## Results
+
+
+![Before](./img/before.jpeg)
+
+![After](./img/after.jpeg)
