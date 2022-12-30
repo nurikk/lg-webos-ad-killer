@@ -1,0 +1,43 @@
+#!/usr/bin/python3
+
+import json
+import os
+import shlex
+
+
+OVERRIDE_SOURCE = '/mnt/lg/cmn_data/sdp/sdx/detailconfig.json'
+OVERRIDE_DESTINATION = '/tmp/detailconfig.json'
+WHITELISTED_SHELFS = ['HOME_SH_APPS',
+                      'HOME_SH_HOMEDASHBOARD', 'HOME_SH_BROWSER']
+STOP_SERVICES = ['sdx', 'com.webos.app.home']
+
+
+def pkill(name):
+    os.system(f'pkill -f {shlex.quote(name)}')
+
+
+def mount(sorce, destination):
+    os.system(f'umount {shlex.quote(destination)}')
+    os.system(f'mount --bind {shlex.quote(sorce)} {shlex.quote(destination)}')
+
+
+def clean_shelfs(source, destination):
+    with open(source) as dtc_fp:
+        data = json.load(dtc_fp)
+        for idx, config in enumerate(data['smartConfig']):
+            if 'ai_home' in config and 'ai_home_info' in config['ai_home']:
+                config_to_filter = config['ai_home']['ai_home_info']
+                filtered_config = [
+                    c for c in config_to_filter if c['shelfId'] in WHITELISTED_SHELFS
+                ]
+                data['smartConfig'][idx]['ai_home']['ai_home_info'] = filtered_config
+            with open(destination, 'w') as destination_fp:
+                json.dump(data, destination_fp)
+
+    mount(destination, source)
+
+
+if __name__ == "__main__":
+    [pkill(service) for service in STOP_SERVICES]
+    clean_shelfs(OVERRIDE_SOURCE, OVERRIDE_DESTINATION)
+    [pkill(service) for service in STOP_SERVICES]
