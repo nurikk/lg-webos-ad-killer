@@ -1,5 +1,6 @@
 # Remove ads from LG WebOs home screen
 Tested on OLED65C24LA
+    
     fw: 03.21.30
 
 
