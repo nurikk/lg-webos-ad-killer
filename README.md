@@ -6,7 +6,7 @@ Tested on OLED65C24LA
 
 **WARNING!** This script is provided with no warranty, use at your own risk. 
 I have done the best I can to ensure the changes are safe and that they are not permanent.
-To neutralize this script, simply remove the USB and reboot the TV.
+To neutralize this script, simply remove `/var/lib/webosbrew/init.d/ad_killer` file from your TV and reboot it.
 
 ## Installation
 1. You must root your TV and have webosbrew installed
