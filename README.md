@@ -25,7 +25,9 @@ After reboot your tv OR run command
 
 ## Results
 
+# Before
 
 ![Before](./img/before.jpeg)
+# After
 
 ![After](./img/after.jpeg)
