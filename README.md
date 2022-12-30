@@ -1,5 +1,6 @@
 # Remove ads from LG WebOs home screen
-Tested on OLED65C24LA  
+Tested on OLED65C24LA
+    fw: 03.21.30
 
 
 **WARNING!** This script is provided with no warranty, use at your own risk. 
@@ -13,4 +14,9 @@ To neutralize this script, simply remove the USB and reboot the TV.
 ```
 curl -o /var/lib/webosbrew/init.d/ad_killer https://raw.githubusercontent.com/nurikk/lg-webos-ad-killer/master/ad_killer
 chmod +x /var/lib/webosbrew/init.d/ad_killer
+```
+
+After reboot your tv OR run command
+```
+/var/lib/webosbrew/init.d/ad_killer
 ```

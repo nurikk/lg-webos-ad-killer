@@ -27,9 +27,13 @@ def clean_shelfs(source, destination):
         for idx, config in enumerate(data['smartConfig']):
             if 'ai_home' in config and 'ai_home_info' in config['ai_home']:
                 config_to_filter = config['ai_home']['ai_home_info']
-                filtered_config = [
-                    c for c in config_to_filter if c['shelfId'] in WHITELISTED_SHELFS
-                ]
+                filtered_config = []
+                for config in config_to_filter:
+                    if config['shelfId'] in WHITELISTED_SHELFS:
+                        filtered_config.append(config)
+                    else:
+                        print(f'Removing shelf {config["shelfId"]}')
+                
                 data['smartConfig'][idx]['ai_home']['ai_home_info'] = filtered_config
             with open(destination, 'w') as destination_fp:
                 json.dump(data, destination_fp)
