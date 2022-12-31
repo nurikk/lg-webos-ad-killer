@@ -4,7 +4,13 @@ Tested on OLED65C24LA
     fw: 03.21.30
 
 
-**WARNING!** This script is provided with no warranty, use at your own risk. 
+# Supported versions
+
+1. webos7 (22)
+
+# **WARNING!** 
+
+This script is provided with no warranty, use at your own risk. 
 I have done the best I can to ensure the changes are safe and that they are not permanent.
 To neutralize this script, simply remove `/var/lib/webosbrew/init.d/ad_killer` file from your TV and reboot it.
 
