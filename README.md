@@ -33,3 +33,4 @@ chmod +x /var/lib/webosbrew/init.d/ad_killer
 # After
 
 ![After](./img/after.jpeg)
+![After](./img/edit.jpeg)
