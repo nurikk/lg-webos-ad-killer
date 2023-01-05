@@ -8,7 +8,7 @@ import shlex
 OVERRIDE_SOURCE = '/mnt/lg/cmn_data/sdp/sdx/detailconfig.json'
 OVERRIDE_DESTINATION = '/tmp/detailconfig.json'
 WHITELISTED_SHELFS = ['HOME_SH_APPS',
-                      'HOME_SH_HOMEDASHBOARD', 'HOME_SH_BROWSER']
+                      'HOME_SH_HOMEDASHBOARD']
 STOP_SERVICES = ['sdx', 'com.webos.app.home']
 
 
