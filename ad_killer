@@ -35,8 +35,8 @@ def clean_shelfs(source, destination):
                         print(f'Removing shelf {config["shelfId"]}')
                 
                 data['smartConfig'][idx]['ai_home']['ai_home_info'] = filtered_config
-            with open(destination, 'w') as destination_fp:
-                json.dump(data, destination_fp)
+        with open(destination, 'w') as destination_fp:
+            json.dump(data, destination_fp)
 
     mount(destination, source)
 
