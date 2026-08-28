@@ -215,12 +215,12 @@ def stop_units(units, dry_run=False):
     if dry_run:
         return
     for unit in sorted(units):
-        run(['systemctl', 'stop', unit], check=False)
+        run(['systemctl', '--no-block', 'stop', unit], check=False)
 
 
 def start_units(units):
     for unit in sorted(units):
-        run(['systemctl', 'start', unit], check=False)
+        run(['systemctl', '--no-block', 'start', unit], check=False)
 
 
 def previous_block_paths():
@@ -321,7 +321,11 @@ def main():
     if stopped_pids and not args.dry_run:
         time.sleep(0.5)
     blocked_paths = install_process_blocks(executables, dry_run=args.dry_run)
-    killed_pids = [] if args.dry_run else kill_surviving_pids(stopped_pids)
+    if args.dry_run:
+        killed_pids = []
+    else:
+        surviving_pids = matching_pids(executables)
+        killed_pids = kill_surviving_pids(sorted(set(stopped_pids + surviving_pids)))
     home_pids = []
     if args.refresh_home:
         home_pids = terminate_processes({HOME_EXECUTABLE}, dry_run=args.dry_run)
