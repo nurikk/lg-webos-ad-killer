@@ -1,47 +1,316 @@
 #!/usr/bin/python3
 
+import argparse
 import json
 import os
-import shlex
-
+import signal
+import subprocess
+import time
 
 OVERRIDE_SOURCE = '/mnt/lg/cmn_data/sdp/sdx/detailconfig.json'
-OVERRIDE_DESTINATION = '/tmp/detailconfig.json'
-WHITELISTED_SHELFS = ['HOME_SH_APPS',
-                      'HOME_SH_HOMEDASHBOARD']
-STOP_SERVICES = ['sdx', 'com.webos.app.home']
+OVERRIDE_DESTINATION = '/tmp/ad_killer-detailconfig.json'
+BLOCK_STUB = '/tmp/ad_killer-blocked'
+BLOCK_STATE = '/tmp/ad_killer-blocked-paths'
+LEGACY_WATCHDOG_PID = '/tmp/ad_killer-watchdog.pid'
+DISABLE_MARKER = '/var/lib/webosbrew/ad-killer.disabled'
+
+REQUIRED_SHELVES = {'HOME_SH_APPS', 'HOME_SH_HOMEDASHBOARD'}
+PROMOTIONAL_SHELVES = {
+    'HOME_SH_AMAZONPRIME',
+    'HOME_SH_BROWSER',
+    'HOME_SH_CONTENTPROMOTION',
+    'HOME_SH_CONTENT_PREVIEW',
+    'HOME_SH_EDITORSPICK',
+    'HOME_SH_GAME',
+    'HOME_SH_LGCHANNELS_GB',
+    'HOME_SH_LGRECOMMEND_1',
+    'HOME_SH_LGRECOMMEND_2',
+    'HOME_SH_LIFEONSCREEN',
+    'HOME_SH_LIVETV',
+    'HOME_SH_RECOMMENDED',
+    'HOME_SH_SHOPPING_EU',
+    'HOME_SH_SPORTSALERT',
+}
+
+ADS_TELEMETRY_EXECUTABLES = {
+    '/usr/sbin/acr2',
+    '/usr/sbin/admanager',
+    '/usr/sbin/nudge',
+    '/usr/sbin/rdxd',
+    '/usr/sbin/sportsalarm',
+    '/usr/sbin/uploadd',
+}
+PRIVACY_BLOAT_EXECUTABLES = {
+    '/usr/sbin/amazon-alexa-adapter',
+    '/usr/sbin/amazon-alexa-vsk',
+    '/usr/sbin/iot-client',
+    '/usr/sbin/lg.thinqai.adapter',
+    '/usr/sbin/mqtt-client',
+    '/usr/sbin/musicrecognition',
+    '/usr/sbin/nlpmanager',
+    '/usr/sbin/performer',
+    '/usr/sbin/voiceconductor',
+    '/usr/sbin/voiceinput',
+}
+ADS_SYSTEMD_UNITS = {
+    'nudge.service',
+    'uploadd.service',
+}
+PRIVACY_SYSTEMD_UNITS = {
+    'musicrecognition.service',
+    'voiceconductor.service',
+    'voiceinput.service',
+}
+SDX_EXECUTABLE = '/usr/sbin/sdx'
+HOME_EXECUTABLE = '/usr/bin/com.webos.app.home'
 
 
-def pkill(name):
-    os.system(f'pkill -f {shlex.quote(name)}')
+def log(message):
+    print(f'ad_killer: {message}', flush=True)
 
 
-def mount(sorce, destination):
-    os.system(f'umount {shlex.quote(destination)}')
-    os.system(f'mount --bind {shlex.quote(sorce)} {shlex.quote(destination)}')
+def run(command, check=True):
+    return subprocess.run(
+        command,
+        check=check,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
-def clean_shelfs(source, destination):
-    with open(source) as dtc_fp:
-        data = json.load(dtc_fp)
-        for idx, config in enumerate(data['smartConfig']):
-            if 'ai_home' in config and 'ai_home_info' in config['ai_home']:
-                config_to_filter = config['ai_home']['ai_home_info']
-                filtered_config = []
-                for config in config_to_filter:
-                    if config['shelfId'] in WHITELISTED_SHELFS:
-                        filtered_config.append(config)
-                    else:
-                        print(f'Removing shelf {config["shelfId"]}')
-                
-                data['smartConfig'][idx]['ai_home']['ai_home_info'] = filtered_config
-        with open(destination, 'w') as destination_fp:
-            json.dump(data, destination_fp)
-
-    mount(destination, source)
+def selected_executables(profile):
+    if profile == 'ads':
+        return ADS_TELEMETRY_EXECUTABLES
+    return ADS_TELEMETRY_EXECUTABLES | PRIVACY_BLOAT_EXECUTABLES
 
 
-if __name__ == "__main__":
-    [pkill(service) for service in STOP_SERVICES]
-    clean_shelfs(OVERRIDE_SOURCE, OVERRIDE_DESTINATION)
-    [pkill(service) for service in STOP_SERVICES]
+def selected_units(profile):
+    if profile == 'ads':
+        return ADS_SYSTEMD_UNITS
+    return ADS_SYSTEMD_UNITS | PRIVACY_SYSTEMD_UNITS
+
+
+def shelf_lists(data):
+    if not isinstance(data, dict) or not isinstance(data.get('smartConfig'), list):
+        raise ValueError('invalid smartConfig structure')
+    for smart_config in data['smartConfig']:
+        if not isinstance(smart_config, dict):
+            continue
+        ai_home = smart_config.get('ai_home')
+        if not isinstance(ai_home, dict):
+            continue
+        shelves = ai_home.get('ai_home_info')
+        if isinstance(shelves, list):
+            yield ai_home, shelves
+
+
+def clean_shelves(source, destination):
+    source = os.fspath(source)
+    destination = os.fspath(destination)
+    with open(source) as source_file:
+        data = json.load(source_file)
+
+    removed = set()
+    retained_ids = set()
+    found_shelves = False
+    for ai_home, shelves in shelf_lists(data):
+        found_shelves = True
+        filtered = []
+        for shelf in shelves:
+            shelf_id = shelf.get('shelfId') if isinstance(shelf, dict) else None
+            if shelf_id in PROMOTIONAL_SHELVES:
+                removed.add(shelf_id)
+                continue
+            filtered.append(shelf)
+            if isinstance(shelf_id, str):
+                retained_ids.add(shelf_id)
+        ai_home['ai_home_info'] = filtered
+
+    if not found_shelves:
+        raise ValueError('no ai_home_info shelves found')
+    missing = REQUIRED_SHELVES - retained_ids
+    if missing:
+        raise ValueError(f'required shelves missing: {sorted(missing)}')
+
+    temporary = destination + '.tmp'
+    with open(temporary, 'w') as destination_file:
+        json.dump(data, destination_file, separators=(',', ':'))
+        destination_file.flush()
+        os.fsync(destination_file.fileno())
+    with open(temporary) as validation_file:
+        validated = json.load(validation_file)
+    list(shelf_lists(validated))
+    os.replace(temporary, destination)
+    return removed
+
+
+def install_shelf_override(dry_run=False):
+    if not os.path.isfile(OVERRIDE_SOURCE):
+        raise FileNotFoundError(f'missing webOS shelf configuration: {OVERRIDE_SOURCE}')
+    if dry_run:
+        destination = '/tmp/ad_killer-dry-run.json'
+        removed = clean_shelves(OVERRIDE_SOURCE, destination)
+        try:
+            os.unlink(destination)
+        except FileNotFoundError:
+            pass
+        return removed
+
+    run(['umount', OVERRIDE_SOURCE], check=False)
+    removed = clean_shelves(OVERRIDE_SOURCE, OVERRIDE_DESTINATION)
+    run(['mount', '--bind', OVERRIDE_DESTINATION, OVERRIDE_SOURCE])
+    return removed
+
+
+def exact_process_path(pid, proc_root='/proc'):
+    try:
+        path = os.readlink(os.path.join(proc_root, str(pid), 'exe'))
+    except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+        return None
+    suffix = ' (deleted)'
+    return path[:-len(suffix)] if path.endswith(suffix) else path
+
+
+def matching_pids(executables, proc_root='/proc'):
+    matches = []
+    for entry in os.listdir(proc_root):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid != os.getpid() and exact_process_path(pid, proc_root) in executables:
+            matches.append(pid)
+    return sorted(matches)
+
+
+def terminate_processes(executables, dry_run=False):
+    pids = matching_pids(executables)
+    if dry_run:
+        return pids
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    return pids
+
+
+def stop_units(units, dry_run=False):
+    if dry_run:
+        return
+    for unit in sorted(units):
+        run(['systemctl', 'stop', unit], check=False)
+
+
+def start_units(units):
+    for unit in sorted(units):
+        run(['systemctl', 'start', unit], check=False)
+
+
+def previous_block_paths():
+    try:
+        with open(BLOCK_STATE) as state_file:
+            return [line.strip() for line in state_file if line.strip()]
+    except FileNotFoundError:
+        return []
+
+
+def remove_process_blocks():
+    for path in previous_block_paths():
+        run(['umount', path], check=False)
+    try:
+        os.unlink(BLOCK_STATE)
+    except FileNotFoundError:
+        pass
+
+
+def install_process_blocks(executables, dry_run=False):
+    paths = [path for path in sorted(executables) if os.path.isfile(path)]
+    if dry_run:
+        return paths
+
+    remove_process_blocks()
+    with open(BLOCK_STUB, 'w') as stub_file:
+        stub_file.write('#!/bin/sh\nexit 0\n')
+    os.chmod(BLOCK_STUB, 0o755)
+    for path in paths:
+        run(['mount', '--bind', BLOCK_STUB, path])
+    with open(BLOCK_STATE, 'w') as state_file:
+        state_file.write('\n'.join(paths) + '\n')
+    return paths
+
+
+def stop_legacy_watchdog():
+    try:
+        with open(LEGACY_WATCHDOG_PID) as pid_file:
+            pid = int(pid_file.read().strip())
+        with open(f'/proc/{pid}/cmdline', 'rb') as command_file:
+            command = command_file.read().replace(b'\0', b' ')
+        if b'ad_killer' in command and b'--watch' in command:
+            os.kill(pid, signal.SIGTERM)
+    except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError):
+        pass
+    try:
+        os.unlink(LEGACY_WATCHDOG_PID)
+    except FileNotFoundError:
+        pass
+
+
+def rollback():
+    stop_legacy_watchdog()
+    remove_process_blocks()
+    run(['umount', OVERRIDE_SOURCE], check=False)
+    start_units(ADS_SYSTEMD_UNITS | PRIVACY_SYSTEMD_UNITS)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Remove LG webOS ads and optional privacy bloat')
+    parser.add_argument('--disable', action='store_true')
+    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--enable', action='store_true')
+    parser.add_argument('--refresh-home', action='store_true')
+    parser.add_argument(
+        '--profile',
+        choices=('ads', 'privacy'),
+        default=os.environ.get('AD_KILLER_PROFILE', 'privacy'),
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    if args.disable:
+        rollback()
+        with open(DISABLE_MARKER, 'w') as marker:
+            marker.write('disabled\n')
+        log('disabled and rolled back; reboot is not required')
+        return
+    if args.enable:
+        try:
+            os.unlink(DISABLE_MARKER)
+        except FileNotFoundError:
+            pass
+    elif os.path.exists(DISABLE_MARKER):
+        log(f'disabled by {DISABLE_MARKER}')
+        return
+
+    stop_legacy_watchdog()
+    removed_shelves = install_shelf_override(dry_run=args.dry_run)
+    executables = selected_executables(args.profile)
+    units = selected_units(args.profile)
+    stop_units(units, dry_run=args.dry_run)
+    blocked_paths = install_process_blocks(executables, dry_run=args.dry_run)
+    stopped_pids = terminate_processes(executables | {SDX_EXECUTABLE}, dry_run=args.dry_run)
+    home_pids = []
+    if args.refresh_home:
+        home_pids = terminate_processes({HOME_EXECUTABLE}, dry_run=args.dry_run)
+
+    log(f'profile={args.profile}')
+    log(f'removed shelves={",".join(sorted(removed_shelves)) or "none"}')
+    log(f'blocked executables={",".join(blocked_paths) or "none"}')
+    log(f'matched process pids={",".join(map(str, stopped_pids)) or "none"}')
+    if args.refresh_home:
+        log(f'home pids to refresh={",".join(map(str, home_pids)) or "none"}')
+
+
+if __name__ == '__main__':
+    main()
