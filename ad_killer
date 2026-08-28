@@ -298,8 +298,10 @@ def main():
     executables = selected_executables(args.profile)
     units = selected_units(args.profile)
     stop_units(units, dry_run=args.dry_run)
-    blocked_paths = install_process_blocks(executables, dry_run=args.dry_run)
+    if not args.dry_run:
+        remove_process_blocks()
     stopped_pids = terminate_processes(executables | {SDX_EXECUTABLE}, dry_run=args.dry_run)
+    blocked_paths = install_process_blocks(executables, dry_run=args.dry_run)
     home_pids = []
     if args.refresh_home:
         home_pids = terminate_processes({HOME_EXECUTABLE}, dry_run=args.dry_run)
