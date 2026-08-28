@@ -84,6 +84,14 @@ class AdKillerTests(unittest.TestCase):
         self.assertIn('/usr/sbin/voiceinput', privacy)
         self.assertIn('/usr/sbin/amazon-alexa-adapter', privacy)
         self.assertIn('/usr/sbin/lg.thinqai.adapter', privacy)
+        self.assertIn(
+            '/var/palm/jail/amazon.alexa.adapter/usr/sbin/amazon-alexa-adapter',
+            privacy,
+        )
+        self.assertIn(
+            '/var/palm/jail/lg.thinqai.adapter/usr/sbin/lg.thinqai.adapter',
+            privacy,
+        )
         self.assertNotIn(ad_killer.SDX_EXECUTABLE, privacy)
         self.assertNotIn(ad_killer.HOME_EXECUTABLE, privacy)
 
