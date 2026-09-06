@@ -1,6 +1,10 @@
 # Remove ads and privacy bloat from LG webOS
 
-Tested on **OLED65C24LA**, webOS 7.4 / webOS TV 22.
+Tested on:
+- **OLED65C24LA**, webOS 7.4 / webOS TV 22 (Python 3)
+- **OLED55C16LA**, webOS 6.5.3 (Python 2.7.16)
+
+Compatible with both Python 2.7.16 and Python 3.x without external dependencies.
 
 The script applies reversible runtime changes at boot through webOS Homebrew Channel:
 
@@ -48,6 +52,14 @@ Useful commands:
 
 # Remove the disable marker and apply again
 /var/lib/webosbrew/init.d/ad_killer --enable
+```
+
+## Diagnostics
+
+A standalone, read-only diagnostic script `diagnose.py` is included to verify compatibility before applying any changes:
+
+```sh
+/usr/bin/python diagnose.py
 ```
 
 All runtime mounts disappear on reboot. The persistent disable marker is `/var/lib/webosbrew/ad-killer.disabled`.
