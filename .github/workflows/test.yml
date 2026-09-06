@@ -1,0 +1,36 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: python:2.7.18
+            python: python
+            launcher: python
+            absent_launcher: python3
+          - image: python:3.5.10
+            python: python
+            launcher: python3
+            absent_launcher: python
+          - image: python:3.13
+            python: python
+            launcher: python3
+            absent_launcher: python
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run unittest in ${{ matrix.image }}
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work "${{ matrix.image }}" sh -ec '
+            interpreter="$(command -v ${{ matrix.python }})"
+            ln -sf "$interpreter" "/usr/bin/${{ matrix.launcher }}"
+            rm -f "/usr/bin/${{ matrix.absent_launcher }}"
+            ./ad_killer --help
+            ${{ matrix.python }} -m unittest discover -v
+          '

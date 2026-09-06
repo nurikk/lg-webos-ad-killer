@@ -1,8 +1,10 @@
 import errno
 import json
 import os
+import io
 import shutil
 import tempfile
+import subprocess
 import unittest
 
 SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ad_killer')
@@ -176,6 +178,146 @@ class AdKillerTests(unittest.TestCase):
         self.assertTrue(custom.dry_run)
         self.assertTrue(custom.refresh_home)
 
+
+    def test_launcher_runs_help(self):
+        process = subprocess.Popen(
+            [SCRIPT_PATH, '--help'], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        stdout, stderr = process.communicate()
+        self.assertEqual(process.returncode, 0, stderr)
+        self.assertIn(b'usage: ad_killer', stdout)
+
+    def test_clean_shelves_rejects_malformed_shelf_id(self):
+        data = {
+            'smartConfig': [{
+                'ai_home': {
+                    'ai_home_info': [
+                        {'shelfId': 'HOME_SH_APPS'},
+                        {'shelfId': []},
+                        {'shelfId': 'HOME_SH_HOMEDASHBOARD'},
+                    ]
+                }
+            }]
+        }
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / 'source.json'
+            destination = Path(directory) / 'destination.json'
+            source.write_text(json.dumps(data))
+            with self.assertRaisesRegex(ValueError, 'invalid shelfId'):
+                ad_killer.clean_shelves(source, destination)
+
+    def test_block_state_errors_other_than_enoent_propagate(self):
+        original_state = ad_killer.BLOCK_STATE
+        original_open = getattr(ad_killer, 'open', None)
+
+        def fail_open(*args, **kwargs):
+            raise IOError(errno.EACCES, 'permission denied')
+
+        with TemporaryDirectory() as directory:
+            try:
+                ad_killer.BLOCK_STATE = os.path.join(directory, 'blocked-state')
+                ad_killer.open = fail_open
+                with self.assertRaises(IOError):
+                    ad_killer.previous_block_paths()
+            finally:
+                ad_killer.BLOCK_STATE = original_state
+                if original_open is None:
+                    del ad_killer.open
+                else:
+                    ad_killer.open = original_open
+
+    def test_block_state_deletion_errors_other_than_enoent_propagate(self):
+        original_state = ad_killer.BLOCK_STATE
+        original_unlink = ad_killer.os.unlink
+        original_previous = ad_killer.previous_block_paths
+        original_run = ad_killer.run
+
+        with TemporaryDirectory() as directory:
+            state_path = os.path.join(directory, 'blocked-state')
+            with open(state_path, 'w') as state_file:
+                state_file.write('unused\n')
+
+            def fail_unlink(path):
+                if path == state_path:
+                    raise OSError(errno.EROFS, 'read-only filesystem')
+                return original_unlink(path)
+
+            try:
+                ad_killer.BLOCK_STATE = state_path
+                ad_killer.previous_block_paths = lambda: []
+                ad_killer.run = lambda *args, **kwargs: self.fail('external command executed')
+                ad_killer.os.unlink = fail_unlink
+                with self.assertRaises(OSError):
+                    ad_killer.remove_process_blocks()
+            finally:
+                ad_killer.BLOCK_STATE = original_state
+                ad_killer.previous_block_paths = original_previous
+                ad_killer.run = original_run
+                ad_killer.os.unlink = original_unlink
+
+    def test_enable_marker_errors_other_than_enoent_propagate(self):
+        original_unlink = ad_killer.os.unlink
+        original_parse_args = ad_killer.parse_args
+
+        def fail_unlink(path):
+            if path == ad_killer.DISABLE_MARKER:
+                raise OSError(errno.EACCES, 'permission denied')
+            return original_unlink(path)
+
+        try:
+            ad_killer.os.unlink = fail_unlink
+            ad_killer.parse_args = lambda: ad_killer.Namespace(
+                disable=False, dry_run=False, enable=True, refresh_home=False, profile='privacy'
+            )
+            with self.assertRaises(OSError):
+                ad_killer.main()
+        finally:
+            ad_killer.os.unlink = original_unlink
+            ad_killer.parse_args = original_parse_args
+
+    def test_watchdog_esrch_is_ignored(self):
+        original_pid_file = ad_killer.LEGACY_WATCHDOG_PID
+        original_open = getattr(ad_killer, 'open', None)
+        builtin_open = open
+        original_kill = ad_killer.os.kill
+
+        def fake_open(path, *args, **kwargs):
+            if path == '/proc/42/cmdline':
+                return io.BytesIO(b'ad_killer\0--watch')
+            return builtin_open(path, *args, **kwargs)
+
+        def missing_process(pid, signal_number):
+            raise OSError(errno.ESRCH, 'process disappeared')
+
+        with TemporaryDirectory() as directory:
+            pid_file = os.path.join(directory, 'watchdog.pid')
+            with open(pid_file, 'w') as state_file:
+                state_file.write('42')
+            try:
+                ad_killer.LEGACY_WATCHDOG_PID = pid_file
+                ad_killer.open = fake_open
+                ad_killer.os.kill = missing_process
+                ad_killer.stop_legacy_watchdog()
+                self.assertFalse(os.path.exists(pid_file))
+            finally:
+                ad_killer.LEGACY_WATCHDOG_PID = original_pid_file
+                ad_killer.os.kill = original_kill
+                if original_open is None:
+                    del ad_killer.open
+                else:
+                    ad_killer.open = original_open
+
+    def test_process_readlink_errors_are_ignored(self):
+        original_readlink = ad_killer.os.readlink
+
+        def fail_readlink(path):
+            raise OSError(errno.EIO, 'proc I/O error')
+
+        try:
+            ad_killer.os.readlink = fail_readlink
+            self.assertIsNone(ad_killer.exact_process_path(42))
+        finally:
+            ad_killer.os.readlink = original_readlink
 
 if __name__ == '__main__':
     unittest.main()

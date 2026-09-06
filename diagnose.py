@@ -1,11 +1,15 @@
-#!/usr/bin/python
+#!/bin/sh
+""":"
+if [ -x /usr/bin/python3 ]; then
+    exec /usr/bin/python3 "$0" "$@"
+fi
+exec /usr/bin/python "$0" "$@"
+":"""
 """
 diagnose.py - Diagnostic check for LG webOS ad_killer compatibility.
 Compatible with Python 2.7.16 and Python 3.x.
-Performs read-only inspection of system files, executables, processes, and configuration.
+Performs non-invasive inspection by default.
 """
-
-from __future__ import print_function
 
 import errno
 import json
@@ -13,11 +17,32 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 
 try:
     string_types = (str, unicode)
 except NameError:
     string_types = (str,)
+
+try:
+    text_type = unicode
+except NameError:
+    text_type = str
+
+
+def to_text(value):
+    if isinstance(value, text_type):
+        return value
+    if sys.version_info[0] == 2 and isinstance(value, str):
+        return value.decode('utf-8', 'replace')
+    return text_type(value)
+
+
+def print_message(message):
+    if sys.version_info[0] == 2 and isinstance(message, text_type):
+        sys.stdout.write(message.encode('utf-8') + '\n')
+    else:
+        sys.stdout.write(message + '\n')
 
 OVERRIDE_SOURCE = '/mnt/lg/cmn_data/sdp/sdx/detailconfig.json'
 OVERRIDE_DESTINATION = '/tmp/ad_killer-detailconfig.json'
@@ -96,18 +121,18 @@ class DiagnosticReporter(object):
 
     def ok(self, category, message):
         self.passes += 1
-        print('[PASS] {0}: {1}'.format(category, message))
+        print_message(u'[PASS] {0}: {1}'.format(to_text(category), to_text(message)))
 
     def warn(self, category, message):
         self.warns += 1
-        print('[WARN] {0}: {1}'.format(category, message))
+        print_message(u'[WARN] {0}: {1}'.format(to_text(category), to_text(message)))
 
     def fail(self, category, message):
         self.fails += 1
-        print('[FAIL] {0}: {1}'.format(category, message))
+        print_message(u'[FAIL] {0}: {1}'.format(to_text(category), to_text(message)))
 
     def info(self, category, message):
-        print('[INFO] {0}: {1}'.format(category, message))
+        print_message(u'[INFO] {0}: {1}'.format(to_text(category), to_text(message)))
 
 
 def check_command(name):
@@ -144,7 +169,9 @@ def run_cmd(args):
 def exact_process_path(pid, proc_root='/proc'):
     try:
         path = os.readlink(os.path.join(proc_root, str(pid), 'exe'))
-    except (EnvironmentError, AttributeError):
+    except OSError:
+        return None
+    except AttributeError:
         return None
     suffix = ' (deleted)'
     return path[:-len(suffix)] if path.endswith(suffix) else path
@@ -212,7 +239,7 @@ def check_utilities(diag):
     if systemctl_bin:
         diag.ok('Command', 'systemctl found at {0}'.format(systemctl_bin))
     else:
-        diag.warn('Command', 'systemctl not found; service stopping will fall back or be skipped')
+        diag.fail('Command', 'systemctl not found; ad_killer cannot stop service units')
 
 
 def check_shelves_config(diag):
@@ -227,8 +254,8 @@ def check_shelves_config(diag):
     try:
         with open(OVERRIDE_SOURCE, 'r') as f:
             data = json.load(f)
-    except Exception as e:
-        diag.fail('Shelf Config', 'Failed to parse JSON in {0}: {1}'.format(OVERRIDE_SOURCE, e))
+    except Exception as error:
+        diag.fail('Shelf Config', 'Failed to parse JSON in {0}: {1}'.format(OVERRIDE_SOURCE, error))
         return
 
     if not isinstance(data, dict) or not isinstance(data.get('smartConfig'), list):
@@ -245,12 +272,13 @@ def check_shelves_config(diag):
             continue
         shelves = ai_home.get('ai_home_info')
         if isinstance(shelves, list):
-            for s in shelves:
-                if isinstance(s, dict):
-                    sid = s.get('shelfId')
-                    if sid and isinstance(sid, string_types):
-                        found_shelf_ids.append(str(sid))
-                        total_shelves += 1
+            for shelf in shelves:
+                shelf_id = shelf.get('shelfId') if isinstance(shelf, dict) else None
+                if not isinstance(shelf_id, string_types) or not shelf_id:
+                    diag.fail('Shelf Config', 'Invalid shelfId: {0!r}'.format(shelf_id))
+                    return
+                found_shelf_ids.append(shelf_id)
+                total_shelves += 1
 
     shelf_set = set(found_shelf_ids)
     missing_required = REQUIRED_SHELVES - shelf_set
@@ -282,8 +310,8 @@ def check_shelves_config(diag):
     if unknown_shelves:
         diag.info(
             'Shelf Config',
-            '{0} custom/future shelves will be preserved: {1}'.format(
-                len(unknown_shelves), ', '.join(sorted(unknown_shelves))
+            u'{0} custom/future shelves will be preserved: {1}'.format(
+                len(unknown_shelves), u', '.join(sorted(unknown_shelves))
             )
         )
 
@@ -371,18 +399,53 @@ def check_systemd_units(diag):
             diag.info('Service Unit', '{0} status: {1}'.format(unit, state or 'inactive/not found'))
 
 
-def check_filesystem_and_mounts(diag):
-    # Test /tmp writable
-    test_file = '/tmp/ad_killer_diag_test_{0}'.format(os.getpid())
+def check_bind_mount(diag):
+    probe_dir = None
+    src_test = None
+    dst_test = None
+    mounted = False
     try:
-        with open(test_file, 'w') as f:
-            f.write('test\n')
-        os.unlink(test_file)
-        diag.ok('Filesystem', '/tmp is writable')
-    except (IOError, OSError) as e:
-        diag.fail('Filesystem', 'Cannot write to /tmp: {0}'.format(e))
+        probe_dir = tempfile.mkdtemp(prefix='ad_killer_diag_')
+        src_test = os.path.join(probe_dir, 'source')
+        dst_test = os.path.join(probe_dir, 'destination')
+        for path, contents in ((src_test, 'src\n'), (dst_test, 'dst\n')):
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, 'w') as probe_file:
+                probe_file.write(contents)
+        code, _ = run_cmd(['mount', '--bind', src_test, dst_test])
+        if code == 0:
+            mounted = True
+            diag.ok('Bind Mount', 'Kernel bind mounts function correctly')
+        else:
+            diag.warn('Bind Mount', 'mount --bind returned exit code {0}'.format(code))
+    except (IOError, OSError) as error:
+        diag.warn('Bind Mount', 'Bind mount probe failed: {0}'.format(error))
+    finally:
+        if mounted:
+            code, _ = run_cmd(['umount', dst_test])
+            if code != 0:
+                diag.fail('Bind Mount', 'Could not unmount bind-mount probe (exit code {0})'.format(code))
+        for path in (src_test, dst_test):
+            if path is not None:
+                try:
+                    os.unlink(path)
+                except OSError as error:
+                    if error.errno != errno.ENOENT:
+                        diag.fail('Bind Mount', 'Could not remove probe file {0}: {1}'.format(path, error))
+        if probe_dir is not None:
+            try:
+                os.rmdir(probe_dir)
+            except OSError as error:
+                if error.errno != errno.ENOENT:
+                    diag.fail('Bind Mount', 'Could not remove probe directory {0}: {1}'.format(probe_dir, error))
 
-    # Test /var/lib/webosbrew
+
+def check_filesystem_and_mounts(diag, probe_bind_mount=False):
+    if probe_bind_mount:
+        check_bind_mount(diag)
+    else:
+        diag.info('Filesystem', 'Non-invasive checks only; use --probe-bind-mount to test bind mounts')
+
     if os.path.isdir(WEBOSBREW_DIR):
         writable = os.access(WEBOSBREW_DIR, os.W_OK)
         if writable:
@@ -397,36 +460,23 @@ def check_filesystem_and_mounts(diag):
     else:
         diag.info('webosbrew', '{0} directory does not exist yet'.format(WEBOSBREW_INIT_D))
 
-    # Test bind mount if root
-    if hasattr(os, 'geteuid') and os.geteuid() == 0 and check_command('mount') and check_command('umount'):
-        src_test = '/tmp/ad_killer_bm_src_{0}'.format(os.getpid())
-        dst_test = '/tmp/ad_killer_bm_dst_{0}'.format(os.getpid())
-        try:
-            with open(src_test, 'w') as f:
-                f.write('src\n')
-            with open(dst_test, 'w') as f:
-                f.write('dst\n')
-            ret, _ = run_cmd(['mount', '--bind', src_test, dst_test])
-            if ret == 0:
-                diag.ok('Bind Mount', 'Kernel bind mounts function correctly')
-                run_cmd(['umount', dst_test])
-            else:
-                diag.warn('Bind Mount', 'mount --bind returned exit code {0}'.format(ret))
-        except Exception as e:
-            diag.warn('Bind Mount', 'Bind mount test raised: {0}'.format(e))
-        finally:
-            try:
-                run_cmd(['umount', dst_test])
-            except Exception:
-                pass
-            for p in [src_test, dst_test]:
-                try:
-                    os.unlink(p)
-                except (IOError, OSError):
-                    pass
+
+def parse_args(args=None):
+    if args is None:
+        args = sys.argv[1:]
+    if not args:
+        return False
+    if args == ['--probe-bind-mount']:
+        return True
+    if args == ['-h'] or args == ['--help']:
+        print('usage: diagnose.py [--probe-bind-mount]')
+        sys.exit(0)
+    sys.stderr.write('diagnose.py: error: unrecognized argument\n')
+    sys.exit(2)
 
 
-def main():
+def main(args=None):
+    probe_bind_mount = parse_args(args)
     print('=' * 60)
     print('  LG webOS ad_killer Compatibility Diagnostics')
     print('=' * 60)
@@ -442,7 +492,7 @@ def main():
     print('-' * 60)
     check_systemd_units(diag)
     print('-' * 60)
-    check_filesystem_and_mounts(diag)
+    check_filesystem_and_mounts(diag, probe_bind_mount)
     print('=' * 60)
     print('Summary: {0} passed, {1} warnings, {2} failures'.format(
         diag.passes, diag.warns, diag.fails

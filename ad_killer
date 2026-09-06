@@ -1,4 +1,10 @@
-#!/usr/bin/python
+#!/bin/sh
+""":"
+if [ -x /usr/bin/python3 ]; then
+    exec /usr/bin/python3 "$0" "$@"
+fi
+exec /usr/bin/python "$0" "$@"
+":"""
 
 import errno
 import json
@@ -17,6 +23,12 @@ try:
     _basestring = basestring
 except NameError:
     _basestring = str
+
+
+def _raise_unless_enoent(error):
+    if error.errno != errno.ENOENT:
+        raise error
+
 
 try:
     _fspath = os.fspath
@@ -37,8 +49,8 @@ except AttributeError:
         def _replace(src, dst):
             try:
                 os.remove(dst)
-            except OSError:
-                pass
+            except OSError as error:
+                _raise_unless_enoent(error)
             os.rename(src, dst)
 
 OVERRIDE_SOURCE = '/mnt/lg/cmn_data/sdp/sdx/detailconfig.json'
@@ -161,12 +173,13 @@ def clean_shelves(source, destination):
         filtered = []
         for shelf in shelves:
             shelf_id = shelf.get('shelfId') if isinstance(shelf, dict) else None
+            if not isinstance(shelf_id, string_types) or not shelf_id:
+                raise ValueError('invalid shelfId: {0!r}'.format(shelf_id))
             if shelf_id in PROMOTIONAL_SHELVES:
                 removed.add(shelf_id)
                 continue
             filtered.append(shelf)
-            if isinstance(shelf_id, string_types):
-                retained_ids.add(shelf_id)
+            retained_ids.add(shelf_id)
         ai_home['ai_home_info'] = filtered
 
     if not found_shelves:
@@ -195,8 +208,8 @@ def install_shelf_override(dry_run=False):
         removed = clean_shelves(OVERRIDE_SOURCE, destination)
         try:
             os.unlink(destination)
-        except (IOError, OSError):
-            pass
+        except OSError as error:
+            _raise_unless_enoent(error)
         return removed
 
     run(['umount', OVERRIDE_SOURCE], check=False)
@@ -208,7 +221,9 @@ def install_shelf_override(dry_run=False):
 def exact_process_path(pid, proc_root='/proc'):
     try:
         path = os.readlink(os.path.join(proc_root, str(pid), 'exe'))
-    except (EnvironmentError, AttributeError):
+    except OSError:
+        return None
+    except AttributeError:
         return None
     suffix = ' (deleted)'
     return path[:-len(suffix)] if path.endswith(suffix) else path
@@ -232,8 +247,9 @@ def terminate_processes(executables, dry_run=False):
     for pid in pids:
         try:
             os.kill(pid, signal.SIGTERM)
-        except (EnvironmentError, OSError):
-            pass
+        except OSError as error:
+            if error.errno != errno.ESRCH:
+                raise
     return pids
 
 
@@ -245,8 +261,9 @@ def kill_surviving_pids(pids):
         try:
             os.kill(pid, signal.SIGKILL)
             killed.append(pid)
-        except (EnvironmentError, OSError):
-            pass
+        except OSError as error:
+            if error.errno != errno.ESRCH:
+                raise
     return killed
 
 
@@ -266,7 +283,8 @@ def previous_block_paths():
     try:
         with open(BLOCK_STATE) as state_file:
             return [line.strip() for line in state_file if line.strip()]
-    except (IOError, OSError):
+    except IOError as error:
+        _raise_unless_enoent(error)
         return []
 
 
@@ -275,8 +293,8 @@ def remove_process_blocks():
         run(['umount', path], check=False)
     try:
         os.unlink(BLOCK_STATE)
-    except (IOError, OSError):
-        pass
+    except OSError as error:
+        _raise_unless_enoent(error)
 
 
 def install_process_blocks(executables, dry_run=False):
@@ -303,12 +321,15 @@ def stop_legacy_watchdog():
             command = command_file.read().replace(b'\0', b' ')
         if b'ad_killer' in command and b'--watch' in command:
             os.kill(pid, signal.SIGTERM)
-    except (EnvironmentError, OSError, ValueError):
+    except (IOError, OSError) as error:
+        if error.errno not in (errno.ENOENT, errno.EACCES, errno.ESRCH):
+            raise
+    except ValueError:
         pass
     try:
         os.unlink(LEGACY_WATCHDOG_PID)
-    except (IOError, OSError):
-        pass
+    except OSError as error:
+        _raise_unless_enoent(error)
 
 
 def rollback():
@@ -401,8 +422,8 @@ def main():
     if args.enable:
         try:
             os.unlink(DISABLE_MARKER)
-        except (IOError, OSError):
-            pass
+        except OSError as error:
+            _raise_unless_enoent(error)
     elif os.path.exists(DISABLE_MARKER):
         log('disabled by {0}'.format(DISABLE_MARKER))
         return

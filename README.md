@@ -56,10 +56,16 @@ Useful commands:
 
 ## Diagnostics
 
-A standalone, read-only diagnostic script `diagnose.py` is included to verify compatibility before applying any changes:
+A standalone diagnostic script checks compatibility before applying changes. It is non-invasive by default: it does not create files, bind-mount, or unmount anything.
 
 ```sh
-/usr/bin/python diagnose.py
+./diagnose.py
+```
+
+Use an active bind-mount probe only when needed:
+
+```sh
+./diagnose.py --probe-bind-mount
 ```
 
 All runtime mounts disappear on reboot. The persistent disable marker is `/var/lib/webosbrew/ad-killer.disabled`.
