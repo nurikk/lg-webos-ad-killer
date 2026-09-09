@@ -1,11 +1,57 @@
-#!/usr/bin/python3
+#!/bin/sh
+""":"
+if [ -x /usr/bin/python3 ]; then
+    exec /usr/bin/python3 "$0" "$@"
+fi
+exec /usr/bin/python "$0" "$@"
+":"""
 
-import argparse
+import errno
 import json
 import os
 import signal
 import subprocess
+import sys
 import time
+
+try:
+    string_types = (str, unicode)
+except NameError:
+    string_types = (str,)
+
+try:
+    _basestring = basestring
+except NameError:
+    _basestring = str
+
+
+def _raise_unless_enoent(error):
+    if error.errno != errno.ENOENT:
+        raise error
+
+
+try:
+    _fspath = os.fspath
+except AttributeError:
+    def _fspath(path):
+        if hasattr(path, '__fspath__'):
+            return path.__fspath__()
+        if isinstance(path, _basestring):
+            return path
+        return str(path)
+
+try:
+    _replace = os.replace
+except AttributeError:
+    if os.name == 'posix':
+        _replace = os.rename
+    else:
+        def _replace(src, dst):
+            try:
+                os.remove(dst)
+            except OSError as error:
+                _raise_unless_enoent(error)
+            os.rename(src, dst)
 
 OVERRIDE_SOURCE = '/mnt/lg/cmn_data/sdp/sdx/detailconfig.json'
 OVERRIDE_DESTINATION = '/tmp/ad_killer-detailconfig.json'
@@ -22,7 +68,9 @@ PROMOTIONAL_SHELVES = {
     'HOME_SH_CONTENT_PREVIEW',
     'HOME_SH_EDITORSPICK',
     'HOME_SH_GAME',
+    'HOME_SH_INLINEADBANNER',
     'HOME_SH_LGCHANNELS_GB',
+    'HOME_SH_LGCHANNELS_GIP',
     'HOME_SH_LGRECOMMEND_1',
     'HOME_SH_LGRECOMMEND_2',
     'HOME_SH_LIFEONSCREEN',
@@ -70,16 +118,19 @@ HOME_EXECUTABLE = '/usr/bin/com.webos.app.home'
 
 
 def log(message):
-    print(f'ad_killer: {message}', flush=True)
+    sys.stdout.write('ad_killer: {0}\n'.format(message))
+    sys.stdout.flush()
 
 
 def run(command, check=True):
-    return subprocess.run(
-        command,
-        check=check,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    devnull = open(os.devnull, 'wb')
+    try:
+        returncode = subprocess.call(command, stdout=devnull, stderr=devnull)
+    finally:
+        devnull.close()
+    if check and returncode != 0:
+        raise subprocess.CalledProcessError(returncode, command)
+    return returncode
 
 
 def selected_executables(profile):
@@ -109,8 +160,8 @@ def shelf_lists(data):
 
 
 def clean_shelves(source, destination):
-    source = os.fspath(source)
-    destination = os.fspath(destination)
+    source = _fspath(source)
+    destination = _fspath(destination)
     with open(source) as source_file:
         data = json.load(source_file)
 
@@ -122,19 +173,20 @@ def clean_shelves(source, destination):
         filtered = []
         for shelf in shelves:
             shelf_id = shelf.get('shelfId') if isinstance(shelf, dict) else None
+            if not isinstance(shelf_id, string_types) or not shelf_id:
+                raise ValueError('invalid shelfId: {0!r}'.format(shelf_id))
             if shelf_id in PROMOTIONAL_SHELVES:
                 removed.add(shelf_id)
                 continue
             filtered.append(shelf)
-            if isinstance(shelf_id, str):
-                retained_ids.add(shelf_id)
+            retained_ids.add(shelf_id)
         ai_home['ai_home_info'] = filtered
 
     if not found_shelves:
         raise ValueError('no ai_home_info shelves found')
     missing = REQUIRED_SHELVES - retained_ids
     if missing:
-        raise ValueError(f'required shelves missing: {sorted(missing)}')
+        raise ValueError('required shelves missing: {0}'.format(sorted(missing)))
 
     temporary = destination + '.tmp'
     with open(temporary, 'w') as destination_file:
@@ -144,20 +196,20 @@ def clean_shelves(source, destination):
     with open(temporary) as validation_file:
         validated = json.load(validation_file)
     list(shelf_lists(validated))
-    os.replace(temporary, destination)
+    _replace(temporary, destination)
     return removed
 
 
 def install_shelf_override(dry_run=False):
     if not os.path.isfile(OVERRIDE_SOURCE):
-        raise FileNotFoundError(f'missing webOS shelf configuration: {OVERRIDE_SOURCE}')
+        raise IOError(errno.ENOENT, 'missing webOS shelf configuration: ' + OVERRIDE_SOURCE)
     if dry_run:
         destination = '/tmp/ad_killer-dry-run.json'
         removed = clean_shelves(OVERRIDE_SOURCE, destination)
         try:
             os.unlink(destination)
-        except FileNotFoundError:
-            pass
+        except OSError as error:
+            _raise_unless_enoent(error)
         return removed
 
     run(['umount', OVERRIDE_SOURCE], check=False)
@@ -169,7 +221,9 @@ def install_shelf_override(dry_run=False):
 def exact_process_path(pid, proc_root='/proc'):
     try:
         path = os.readlink(os.path.join(proc_root, str(pid), 'exe'))
-    except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+    except OSError:
+        return None
+    except AttributeError:
         return None
     suffix = ' (deleted)'
     return path[:-len(suffix)] if path.endswith(suffix) else path
@@ -193,22 +247,39 @@ def terminate_processes(executables, dry_run=False):
     for pid in pids:
         try:
             os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        except OSError as error:
+            if error.errno != errno.ESRCH:
+                raise
     return pids
 
 
-def kill_surviving_pids(pids):
+def kill_surviving_pids(pids, executables):
     killed = []
     for pid in pids:
-        if not os.path.exists(f'/proc/{pid}'):
+        if exact_process_path(pid) not in executables:
             continue
         try:
             os.kill(pid, signal.SIGKILL)
             killed.append(pid)
-        except ProcessLookupError:
-            pass
+        except OSError as error:
+            if error.errno != errno.ESRCH:
+                raise
     return killed
+
+
+def refresh_home(dry_run=False):
+    pids = terminate_processes({HOME_EXECUTABLE}, dry_run=dry_run)
+    if dry_run:
+        return pids
+    if pids:
+        time.sleep(0.5)
+        kill_surviving_pids(pids, {HOME_EXECUTABLE})
+    run([
+        'luna-send-pub', '-n', '1',
+        'luna://com.webos.applicationManager/launch',
+        '{"id":"com.webos.app.home"}',
+    ])
+    return pids
 
 
 def stop_units(units, dry_run=False):
@@ -227,7 +298,8 @@ def previous_block_paths():
     try:
         with open(BLOCK_STATE) as state_file:
             return [line.strip() for line in state_file if line.strip()]
-    except FileNotFoundError:
+    except IOError as error:
+        _raise_unless_enoent(error)
         return []
 
 
@@ -236,8 +308,8 @@ def remove_process_blocks():
         run(['umount', path], check=False)
     try:
         os.unlink(BLOCK_STATE)
-    except FileNotFoundError:
-        pass
+    except OSError as error:
+        _raise_unless_enoent(error)
 
 
 def install_process_blocks(executables, dry_run=False):
@@ -260,16 +332,19 @@ def stop_legacy_watchdog():
     try:
         with open(LEGACY_WATCHDOG_PID) as pid_file:
             pid = int(pid_file.read().strip())
-        with open(f'/proc/{pid}/cmdline', 'rb') as command_file:
+        with open('/proc/{0}/cmdline'.format(pid), 'rb') as command_file:
             command = command_file.read().replace(b'\0', b' ')
         if b'ad_killer' in command and b'--watch' in command:
             os.kill(pid, signal.SIGTERM)
-    except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError):
+    except (IOError, OSError) as error:
+        if error.errno not in (errno.ENOENT, errno.EACCES, errno.ESRCH):
+            raise
+    except ValueError:
         pass
     try:
         os.unlink(LEGACY_WATCHDOG_PID)
-    except FileNotFoundError:
-        pass
+    except OSError as error:
+        _raise_unless_enoent(error)
 
 
 def rollback():
@@ -278,19 +353,77 @@ def rollback():
     run(['umount', OVERRIDE_SOURCE], check=False)
     start_units(ADS_SYSTEMD_UNITS | PRIVACY_SYSTEMD_UNITS)
 
+class Namespace(object):
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='Remove LG webOS ads and optional privacy bloat')
-    parser.add_argument('--disable', action='store_true')
-    parser.add_argument('--dry-run', action='store_true')
-    parser.add_argument('--enable', action='store_true')
-    parser.add_argument('--refresh-home', action='store_true')
-    parser.add_argument(
-        '--profile',
-        choices=('ads', 'privacy'),
-        default=os.environ.get('AD_KILLER_PROFILE', 'privacy'),
+    def __repr__(self):
+        keys = sorted(self.__dict__.keys())
+        items = ['{0}={1!r}'.format(k, getattr(self, k)) for k in keys]
+        return 'Namespace({0})'.format(', '.join(items))
+
+
+def parse_args(args=None):
+    if args is None:
+        args = sys.argv[1:]
+
+    default_profile = os.environ.get('AD_KILLER_PROFILE', 'privacy')
+    if default_profile not in ('ads', 'privacy'):
+        default_profile = 'privacy'
+
+    opts = Namespace(
+        disable=False,
+        dry_run=False,
+        enable=False,
+        refresh_home=False,
+        profile=default_profile,
     )
-    return parser.parse_args()
+
+    idx = 0
+    while idx < len(args):
+        arg = args[idx]
+        if arg in ('-h', '--help'):
+            sys.stdout.write(
+                'usage: ad_killer [-h] [--disable] [--dry-run] [--enable] [--refresh-home]\n'
+                '                 [--profile {ads,privacy}]\n\n'
+                'Remove LG webOS ads and optional privacy bloat\n\n'
+                'optional arguments:\n'
+                '  -h, --help            show this help message and exit\n'
+                '  --disable\n'
+                '  --dry-run\n'
+                '  --enable\n'
+                '  --refresh-home\n'
+                '  --profile {ads,privacy}\n'
+            )
+            sys.exit(0)
+        elif arg == '--disable':
+            opts.disable = True
+        elif arg == '--dry-run':
+            opts.dry_run = True
+        elif arg == '--enable':
+            opts.enable = True
+        elif arg == '--refresh-home':
+            opts.refresh_home = True
+        elif arg == '--profile':
+            idx += 1
+            if idx >= len(args) or args[idx] not in ('ads', 'privacy'):
+                sys.stderr.write('ad_killer: error: argument --profile: invalid choice (choose from "ads", "privacy")\n')
+                sys.exit(2)
+            opts.profile = args[idx]
+        elif arg.startswith('--profile='):
+            val = arg.split('=', 1)[1]
+            if val not in ('ads', 'privacy'):
+                sys.stderr.write('ad_killer: error: argument --profile: invalid choice (choose from "ads", "privacy")\n')
+                sys.exit(2)
+            opts.profile = val
+        else:
+            sys.stderr.write('ad_killer: error: unrecognized argument: {0}\n'.format(arg))
+            sys.exit(2)
+        idx += 1
+
+    return opts
+
 
 
 def main():
@@ -304,10 +437,10 @@ def main():
     if args.enable:
         try:
             os.unlink(DISABLE_MARKER)
-        except FileNotFoundError:
-            pass
+        except OSError as error:
+            _raise_unless_enoent(error)
     elif os.path.exists(DISABLE_MARKER):
-        log(f'disabled by {DISABLE_MARKER}')
+        log('disabled by {0}'.format(DISABLE_MARKER))
         return
 
     stop_legacy_watchdog()
@@ -325,18 +458,20 @@ def main():
         killed_pids = []
     else:
         surviving_pids = matching_pids(executables)
-        killed_pids = kill_surviving_pids(sorted(set(stopped_pids + surviving_pids)))
+        killed_pids = kill_surviving_pids(
+            sorted(set(stopped_pids + surviving_pids)), executables
+        )
     home_pids = []
     if args.refresh_home:
-        home_pids = terminate_processes({HOME_EXECUTABLE}, dry_run=args.dry_run)
+        home_pids = refresh_home(dry_run=args.dry_run)
 
-    log(f'profile={args.profile}')
-    log(f'removed shelves={",".join(sorted(removed_shelves)) or "none"}')
-    log(f'blocked executables={",".join(blocked_paths) or "none"}')
-    log(f'matched process pids={",".join(map(str, stopped_pids)) or "none"}')
-    log(f'force-stopped pids={",".join(map(str, killed_pids)) or "none"}')
+    log('profile={0}'.format(args.profile))
+    log('removed shelves={0}'.format(','.join(sorted(removed_shelves)) or 'none'))
+    log('blocked executables={0}'.format(','.join(blocked_paths) or 'none'))
+    log('matched process pids={0}'.format(','.join(map(str, stopped_pids)) or 'none'))
+    log('force-stopped pids={0}'.format(','.join(map(str, killed_pids)) or 'none'))
     if args.refresh_home:
-        log(f'home pids to refresh={",".join(map(str, home_pids)) or "none"}')
+        log('home pids to refresh={0}'.format(','.join(map(str, home_pids)) or 'none'))
 
 
 if __name__ == '__main__':
