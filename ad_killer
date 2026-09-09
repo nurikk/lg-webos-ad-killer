@@ -253,10 +253,10 @@ def terminate_processes(executables, dry_run=False):
     return pids
 
 
-def kill_surviving_pids(pids):
+def kill_surviving_pids(pids, executables):
     killed = []
     for pid in pids:
-        if not os.path.exists('/proc/{0}'.format(pid)):
+        if exact_process_path(pid) not in executables:
             continue
         try:
             os.kill(pid, signal.SIGKILL)
@@ -265,6 +265,21 @@ def kill_surviving_pids(pids):
             if error.errno != errno.ESRCH:
                 raise
     return killed
+
+
+def refresh_home(dry_run=False):
+    pids = terminate_processes({HOME_EXECUTABLE}, dry_run=dry_run)
+    if dry_run:
+        return pids
+    if pids:
+        time.sleep(0.5)
+        kill_surviving_pids(pids, {HOME_EXECUTABLE})
+    run([
+        'luna-send-pub', '-n', '1',
+        'luna://com.webos.applicationManager/launch',
+        '{"id":"com.webos.app.home"}',
+    ])
+    return pids
 
 
 def stop_units(units, dry_run=False):
@@ -443,10 +458,12 @@ def main():
         killed_pids = []
     else:
         surviving_pids = matching_pids(executables)
-        killed_pids = kill_surviving_pids(sorted(set(stopped_pids + surviving_pids)))
+        killed_pids = kill_surviving_pids(
+            sorted(set(stopped_pids + surviving_pids)), executables
+        )
     home_pids = []
     if args.refresh_home:
-        home_pids = terminate_processes({HOME_EXECUTABLE}, dry_run=args.dry_run)
+        home_pids = refresh_home(dry_run=args.dry_run)
 
     log('profile={0}'.format(args.profile))
     log('removed shelves={0}'.format(','.join(sorted(removed_shelves)) or 'none'))

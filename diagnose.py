@@ -17,7 +17,6 @@ import os
 import signal
 import subprocess
 import sys
-import tempfile
 
 try:
     string_types = (str, unicode)
@@ -164,6 +163,23 @@ def run_cmd(args):
         return -1, ''
     finally:
         devnull.close()
+
+
+def make_private_temp_directory(prefix='ad_killer_diag_', directory='/tmp'):
+    for _ in range(1000):
+        random_bytes = os.urandom(8)
+        token = ''.join(
+            '{0:02x}'.format(value if isinstance(value, int) else ord(value))
+            for value in random_bytes
+        )
+        path = os.path.join(directory, prefix + token)
+        try:
+            os.mkdir(path, 0o700)
+            return path
+        except OSError as error:
+            if error.errno != errno.EEXIST:
+                raise
+    raise OSError(errno.EEXIST, 'could not create private temporary directory')
 
 
 def exact_process_path(pid, proc_root='/proc'):
@@ -405,7 +421,7 @@ def check_bind_mount(diag):
     dst_test = None
     mounted = False
     try:
-        probe_dir = tempfile.mkdtemp(prefix='ad_killer_diag_')
+        probe_dir = make_private_temp_directory()
         src_test = os.path.join(probe_dir, 'source')
         dst_test = os.path.join(probe_dir, 'destination')
         for path, contents in ((src_test, 'src\n'), (dst_test, 'dst\n')):

@@ -3,6 +3,8 @@ import json
 import os
 import io
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -34,6 +36,52 @@ except AttributeError:
 
 
 class DiagnoseTests(unittest.TestCase):
+    def test_launcher_runs_without_tempfile_module(self):
+        with TemporaryDirectory() as directory:
+            with open(os.path.join(directory, 'tempfile.py'), 'w') as module_file:
+                module_file.write('raise ImportError("tempfile unavailable")\n')
+            environment = os.environ.copy()
+            environment['PYTHONPATH'] = directory
+            process = subprocess.Popen(
+                [sys.executable, SCRIPT_PATH, '--help'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=environment,
+            )
+            stdout, stderr = process.communicate()
+
+        self.assertEqual(process.returncode, 0, stderr)
+        self.assertIn(b'usage: diagnose.py', stdout)
+
+    def test_private_temp_directory_retries_collision_and_is_private(self):
+        with TemporaryDirectory() as parent:
+            original_urandom = diagnose.os.urandom
+            tokens = [b'\x00' * 8, b'\x01' * 8]
+            first = os.path.join(parent, 'probe_' + ('00' * 8))
+            os.mkdir(first)
+            try:
+                diagnose.os.urandom = lambda size: tokens.pop(0)
+                created = diagnose.make_private_temp_directory(
+                    prefix='probe_', directory=parent
+                )
+            finally:
+                diagnose.os.urandom = original_urandom
+
+            self.assertEqual(created, os.path.join(parent, 'probe_' + ('01' * 8)))
+            self.assertEqual(os.stat(created).st_mode & 0o077, 0)
+
+    def test_private_temp_directory_propagates_permission_errors(self):
+        original_mkdir = diagnose.os.mkdir
+        try:
+            def fail_mkdir(path, mode):
+                raise OSError(errno.EACCES, 'permission denied')
+
+            diagnose.os.mkdir = fail_mkdir
+            with self.assertRaises(OSError):
+                diagnose.make_private_temp_directory()
+        finally:
+            diagnose.os.mkdir = original_mkdir
+
     def test_reporter_counts(self):
         rep = diagnose.DiagnosticReporter()
         rep.ok('Cat', 'pass msg')
@@ -115,16 +163,16 @@ class DiagnoseTests(unittest.TestCase):
             if os.path.lexists(attack_path):
                 self.skipTest('test path already exists')
             os.symlink(target, attack_path)
-            original_mkdtemp = diagnose.tempfile.mkdtemp
+            original_make_temp = diagnose.make_private_temp_directory
             original_run_cmd = diagnose.run_cmd
             try:
-                diagnose.tempfile.mkdtemp = lambda *args, **kwargs: self.fail('default check created a temporary directory')
+                diagnose.make_private_temp_directory = lambda *args, **kwargs: self.fail('default check created a temporary directory')
                 diagnose.run_cmd = lambda args: self.fail('default check ran {0}'.format(args))
                 diagnose.check_filesystem_and_mounts(diagnose.DiagnosticReporter())
                 with open(target) as target_file:
                     self.assertEqual(target_file.read(), 'unchanged')
             finally:
-                diagnose.tempfile.mkdtemp = original_mkdtemp
+                diagnose.make_private_temp_directory = original_make_temp
                 diagnose.run_cmd = original_run_cmd
                 os.unlink(attack_path)
 
@@ -133,7 +181,7 @@ class DiagnoseTests(unittest.TestCase):
             probe_dir = os.path.join(directory, 'probe')
             os.mkdir(probe_dir)
             calls = []
-            original_mkdtemp = diagnose.tempfile.mkdtemp
+            original_make_temp = diagnose.make_private_temp_directory
             original_run_cmd = diagnose.run_cmd
 
             def fake_run_cmd(args):
@@ -141,14 +189,14 @@ class DiagnoseTests(unittest.TestCase):
                 return 0, ''
 
             try:
-                diagnose.tempfile.mkdtemp = lambda **kwargs: probe_dir
+                diagnose.make_private_temp_directory = lambda: probe_dir
                 diagnose.run_cmd = fake_run_cmd
                 diagnose.check_bind_mount(diagnose.DiagnosticReporter())
                 self.assertEqual(len(calls), 2)
                 self.assertEqual(calls[0][0], 'mount')
                 self.assertEqual(calls[1][0], 'umount')
             finally:
-                diagnose.tempfile.mkdtemp = original_mkdtemp
+                diagnose.make_private_temp_directory = original_make_temp
                 diagnose.run_cmd = original_run_cmd
 
     def test_unicode_unknown_shelf_is_reported(self):

@@ -3,6 +3,7 @@ import json
 import os
 import io
 import shutil
+import signal
 import tempfile
 import subprocess
 import unittest
@@ -186,6 +187,81 @@ class AdKillerTests(unittest.TestCase):
         stdout, stderr = process.communicate()
         self.assertEqual(process.returncode, 0, stderr)
         self.assertIn(b'usage: ad_killer', stdout)
+
+    def test_refresh_home_force_stops_a_surviving_original_process(self):
+        original_terminate = ad_killer.terminate_processes
+        original_exact_path = ad_killer.exact_process_path
+        original_kill = ad_killer.os.kill
+        original_run = ad_killer.run
+        original_sleep = ad_killer.time.sleep
+        calls = []
+        try:
+            ad_killer.terminate_processes = lambda executables, dry_run=False: [2395]
+            ad_killer.exact_process_path = lambda pid: ad_killer.HOME_EXECUTABLE
+            ad_killer.os.kill = lambda pid, signal_number: calls.append((pid, signal_number))
+            ad_killer.run = lambda command: calls.append(command)
+            ad_killer.time.sleep = lambda seconds: calls.append(seconds)
+
+            pids = ad_killer.refresh_home()
+
+            self.assertEqual(pids, [2395])
+            self.assertEqual(
+                calls,
+                [
+                    0.5,
+                    (2395, signal.SIGKILL),
+                    [
+                        'luna-send-pub', '-n', '1',
+                        'luna://com.webos.applicationManager/launch',
+                        '{"id":"com.webos.app.home"}',
+                    ],
+                ],
+            )
+        finally:
+            ad_killer.terminate_processes = original_terminate
+            ad_killer.exact_process_path = original_exact_path
+            ad_killer.os.kill = original_kill
+            ad_killer.run = original_run
+            ad_killer.time.sleep = original_sleep
+
+    def test_refresh_home_does_not_kill_a_reused_pid(self):
+        original_terminate = ad_killer.terminate_processes
+        original_exact_path = ad_killer.exact_process_path
+        original_kill = ad_killer.os.kill
+        original_run = ad_killer.run
+        original_sleep = ad_killer.time.sleep
+        try:
+            ad_killer.terminate_processes = lambda executables, dry_run=False: [2395]
+            ad_killer.exact_process_path = lambda pid: '/usr/bin/unrelated'
+            ad_killer.os.kill = lambda *args: self.fail('reused PID was killed')
+            ad_killer.run = lambda command: None
+            ad_killer.time.sleep = lambda seconds: None
+
+            self.assertEqual(ad_killer.refresh_home(), [2395])
+        finally:
+            ad_killer.terminate_processes = original_terminate
+            ad_killer.exact_process_path = original_exact_path
+            ad_killer.os.kill = original_kill
+            ad_killer.run = original_run
+            ad_killer.time.sleep = original_sleep
+
+    def test_refresh_home_dry_run_does_not_sleep_or_signal(self):
+        original_terminate = ad_killer.terminate_processes
+        original_sleep = ad_killer.time.sleep
+        original_kill = ad_killer.os.kill
+        original_run = ad_killer.run
+        try:
+            ad_killer.terminate_processes = lambda executables, dry_run=False: [2395]
+            ad_killer.time.sleep = lambda seconds: self.fail('dry-run slept')
+            ad_killer.os.kill = lambda *args: self.fail('dry-run signaled a process')
+            ad_killer.run = lambda command: self.fail('dry-run launched Home')
+
+            self.assertEqual(ad_killer.refresh_home(dry_run=True), [2395])
+        finally:
+            ad_killer.terminate_processes = original_terminate
+            ad_killer.time.sleep = original_sleep
+            ad_killer.os.kill = original_kill
+            ad_killer.run = original_run
 
     def test_clean_shelves_rejects_malformed_shelf_id(self):
         data = {
